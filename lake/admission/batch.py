@@ -31,8 +31,10 @@ def delete(id):
     return Operation(id, "delete")
 
 
-def bucket_for(id):
-    return zlib.crc32(id.encode("utf-8")) % FIXED_BUCKET_COUNT
+def bucket_for(id, bucket_count=FIXED_BUCKET_COUNT):
+    if bucket_count not in (2, 3):
+        raise ValueError("unsupported bucket count")
+    return zlib.crc32(id.encode("utf-8")) % bucket_count
 
 
 def normalize_batch(operations):

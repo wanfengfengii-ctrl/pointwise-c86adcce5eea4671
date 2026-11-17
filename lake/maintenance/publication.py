@@ -13,12 +13,16 @@ def publish_compaction(catalog, prepared, emit):
     emit("before_compaction_publish", {"head_id": plan.head_id})
     with catalog.write_transaction():
         head = get_head(catalog)
-        inputs = tuple(meta for meta in head.segments
-                       if meta.bucket == plan.bucket)
+        inputs = tuple(
+            meta for meta in head.segments
+            if meta.bucket == plan.bucket
+            and meta.bucket_count == head.bucket_count
+        )
         if head.id != plan.head_id or inputs != plan.inputs:
             raise StalePlan("compaction input head has changed")
         manifest_id = create_manifest(
-            catalog, plan.commit, plan.retained + prepared.outputs
+            catalog, plan.commit, plan.retained + prepared.outputs,
+            plan.bucket_count,
         )
         emit("compaction_metadata_after_manifest", {"manifest_id": manifest_id})
         catalog.connection.execute(

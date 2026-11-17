@@ -47,7 +47,7 @@ def open_segment(paths, meta, max_commit=None):
             key = (record.id, record.commit)
             if previous is not None and key <= previous:
                 raise ValueError("records must have strictly increasing identity")
-            if bucket_for(record.id) != meta.bucket:
+            if bucket_for(record.id, meta.bucket_count) != meta.bucket:
                 raise ValueError("record belongs to another bucket")
             if max_commit is not None and record.commit > max_commit:
                 raise ValueError("record exceeds manifest commit")

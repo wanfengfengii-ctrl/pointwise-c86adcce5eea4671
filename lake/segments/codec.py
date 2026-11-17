@@ -59,6 +59,7 @@ class SegmentMeta:
     index_digest: str
     data_size: int
     index_size: int
+    bucket_count: int = 2
 
 
 def encode_record(record):
@@ -111,15 +112,20 @@ def encode_segment_meta(meta):
 
 def decode_segment_meta(data):
     value = strict_json_loads(data)
-    fields = {"bucket", "count", "min_id", "max_id", "data_digest",
-              "index_digest", "data_size", "index_size", "v"}
-    if type(value) is not dict or set(value) != fields:
+    base_fields = {"bucket", "count", "min_id", "max_id", "data_digest",
+                   "index_digest", "data_size", "index_size", "v"}
+    fields = base_fields | {"bucket_count"}
+    if type(value) is not dict or set(value) not in (base_fields, fields):
         raise ValueError("invalid segment descriptor fields")
     version = value.pop("v")
     if type(version) is not int or version != SEGMENT_FORMAT_VERSION:
         raise ValueError("unsupported descriptor version")
-    if type(value["bucket"]) is not int or value["bucket"] not in (0, 1):
-        raise ValueError("invalid fixed bucket")
+    bucket_count = value.setdefault("bucket_count", 2)
+    if type(bucket_count) is not int or bucket_count not in (2, 3):
+        raise ValueError("invalid segment bucket count")
+    if (type(value["bucket"]) is not int
+            or not 0 <= value["bucket"] < bucket_count):
+        raise ValueError("invalid bucket")
     for name in ("count", "data_size", "index_size"):
         _positive(value[name], name)
     validate_id(value["min_id"])

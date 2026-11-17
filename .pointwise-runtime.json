@@ -5,18 +5,11 @@
   "verify": [
     "python3.11",
     "-B",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tests",
-    "-t",
-    ".",
-    "-v"
+    "verify.py"
   ],
   "demo": [
     "python3.11",
     "-B",
-    "demo.py"
+    "demo_rebucket.py"
   ]
 }

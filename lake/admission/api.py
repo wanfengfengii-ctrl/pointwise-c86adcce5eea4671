@@ -9,6 +9,9 @@ from lake.catalog.manifests import freeze_manifest
 from lake.segments.writer import write_batch_segments
 from lake.reads.api import get_row, scan_rows
 from lake.maintenance.api import compact_bucket, verify_objects
+from lake.rebucket.api import (
+    begin_rebucket, finish_rebucket, rebucket_status, step_rebucket,
+)
 
 
 class Store:
@@ -58,9 +61,10 @@ class Store:
             if previous is not None:
                 return previous
             head, candidate = next_candidate_commit(self.catalog)
+            bucket_count = head.bucket_count
             segments = write_batch_segments(
                 self.paths, batch, candidate, self._emit,
-                self.segment_rows, self.index_stride,
+                self.segment_rows, self.index_stride, bucket_count,
             )
             self._emit("admission_prepared", {
                 "head_id": head.id, "candidate": candidate,
@@ -95,3 +99,22 @@ class Store:
     def verify(self, snapshot=None):
         self._ensure_open()
         return verify_objects(self.catalog, snapshot)
+
+    def begin_rebucket(self, request_id):
+        self._ensure_open()
+        return begin_rebucket(self.catalog, request_id)
+
+    def step_rebucket(self, limit):
+        self._ensure_open()
+        return step_rebucket(
+            self.catalog, limit, self._emit,
+            self.segment_rows, self.index_stride,
+        )
+
+    def finish_rebucket(self):
+        self._ensure_open()
+        return finish_rebucket(self.catalog)
+
+    def rebucket_status(self):
+        self._ensure_open()
+        return rebucket_status(self.catalog)

@@ -44,6 +44,11 @@ Store(path, *, hook=None, segment_rows=128, index_stride=8) 打开一个目录�
 - compact(bucket) 只接受整数 0 或 1，返回清单 ID；无需合并则返回原清单。保留全部原修订和墓碑，不增加业务提交。准备期间当前头改变时抛 lake.maintenance.publication.StalePlan，调用方可重新规划。
 - verify(snapshot=None) 返回 VerificationReport，含 manifest_id、commit、objects、readable 和 to_dict()。逐对象状态含 address、kind、digest、ok、code、reason。数据和索引缺失、摘要、大小及结构错误均使总体不可读。未知快照抛 ValueError。
 - 必要对象不可读时，get 或完整消费 scan 抛 lake.objects.integrity.CorruptObject，保留 address、code、reason 及原异常原因。读及核验不把损坏解释成缺行。
+- begin_rebucket(request_id) -> str：启动一次从 2 桶到 3 桶的在线重分桶，返回持久任务 ID。同请求重复调用返回同一任务且不重置进度；任务已存在而请求不同抛 ValueError。请求命名空间独立于 ingest，空湖也可开始。
+- step_rebucket(limit) -> dict：limit 为正整数（排除布尔），返回 {"processed": n, "ready": bool}，0 <= n <= limit。n 是本次成功复制的来源物理记录数，含旧修订与墓碑。每步接续固定的来源序列与游标，不重扫已完成前缀；准备完成后返回 {"processed": 0, "ready": True}。
+- finish_rebucket() -> bool：来源未搬完或仍会遗漏已接纳修改时返回 False 并保留任务；安全切换返回 True，重复调用仍为 True。
+- rebucket_status() -> dict：独立可 JSON 往返的字典，字段 task_id、phase（idle/copying/ready/finished）、source_buckets（恒 2）、target_buckets（恒 3）、processed、total。total 在开始时固定，ready/finished 时 processed=total。
+- 搬迁期间另一连接可正常 ingest；步骤间可关闭重开。搬迁不分配业务提交、不写接纳回执，同 (id, 逻辑提交号) 的相同内容只算一个事实。copying/ready 阶段 compact 只合并目标布局的段，不改动被固定的来源段；finish 后当前读取与写入只依赖新布局，旧快照与已绑定 scan 保持原结果。
 
 ## 持久状态与发布
 
@@ -55,10 +60,28 @@ lake/catalog 的 SQLite 只保存目录版本、清单和段描述符、当前�
 
 lake/reads 在短读事务中固定清单，之后不再访问可变头。旧快照对象持续保留。lake/maintenance 的同桶压实在写锁外读取、核验及重写，发布时比较完整输入头，另一桶保持原样。对象核验同时检查数据和索引，结构交叉错误定位相关对象且不改目录。
 
+## 在线重分桶
+
+`lake/rebucket` 实现一次 2 桶到 3 桶的在线搬迁，契约见 REBUCKET.md。每个段描述符记录其布局桶数，清单记录所属布局；当前头的读绑定会把主布局段与搬迁期间仍在头中的来源段一起合并，同 `(id, 逻辑提交号)` 的相同内容只计一次。`layout_tasks` 固定来源段序列、来源清单和总记录数，`layout_state` 记录活动桶数、阶段、已处理数与来源游标；两者都是目录元数据，不保存另一份权威行表。
+
+- begin 在短写事务中固定来源段并写入任务，随后把路由切到 3 桶并保留来源段直到 finish。切换后新入仓写目标段；来源段仍属旧布局，只作为复制输入与旧快照依据。begin 之前已准备、begin 之后才发布的入仓会因输入头变化重新准备，按目标布局落段。
+- step 在读事务外按游标读出本轮来源记录、生成并安装目标段，再在短写事务中核对游标与阶段，原子追加目标段、推进 processed 与游标。复制异常不推进进度，重试重复同一区间且不增加业务提交。发布前发出 `rebucket_prepared`（含 task_id、start、stop，位于写事务外）。
+- finish 仅在 processed=total、当前头中的旧布局段恰为固定来源段、且全部目标段对象可读时，把当前头收缩为纯目标布局段并标记 finished；任何一项不满足都返回 False 或抛错并保留可续任务。切换后当前读写只依赖新布局；旧对象不删除，旧固定快照与已绑定 scan 仍按其清单读旧对象。
+
+逻辑身份始终是 (id, 原业务提交号)；布局归属写在段描述符与清单上；续点由任务固定的来源序列加游标给出；退出条件是来源有限记录全部复制且点击发后无遗漏。四者共同保证搬迁期间更正、删除与并发入仓都不会被覆盖或复活。
+
 ## 回归与阶段回调
 
-五个测试文件覆盖接纳、读取、失败、维护与完整性。tests/support.py 的历史参照按成功业务提交独立重放字典，不调用生产读取算法来生成预期。回归包含两连接交错、重开、完整批次拒绝、规范化重放、输入和输出隔离、多字节索引及修订组边界、物理顺序逆置、安装与元数据失败、既有坏对象拒用、过时压实及摘要匹配的非法结构。
+原五个测试文件覆盖接纳、读取、失败、维护与完整性，tests/test_rebucket.py 覆盖在线重分桶。tests/support.py 的历史参照按成功业务提交独立重放字典，不调用生产读取算法来生成预期；重分桶测试与 reconcile_rebucket.py 也用同一原则核对 get、scan、固定快照与业务提交号。回归包含两连接交错、重开、完整批次拒绝、规范化重放、输入和输出隔离、多字节索引及修订组边界、物理顺序逆置、安装与元数据失败、既有坏对象拒用、过时压实及摘要匹配的非法结构，以及来源读出后更正或删除、最后一步前与 ready 后新写、入仓准备跨 begin/finish、步骤异常重试、逐步重开、空湖、无效参数和旧 V1 目录直接打开。
 
-hook(stage, details) 默认不执行动作；用于观测阶段、安排第二连接或传播注入的异常。阶段包括 batch_normalized、before_object_install、object_installed、segment_installed、admission_prepared、before_batch_publish、metadata_after_manifest、scan_bucket、compaction_inputs_read、before_compaction_publish、compaction_metadata_after_manifest。两个 metadata 阶段位于短写事务内，回调不得在这里等待另一个写连接；其余载荷准备、安装及读取阶段均在写事务外。segment_rows 和 index_stride 是正整数，用于控制段大小及索引密度。
+hook(stage, details) 默认不执行动作；用于观测阶段、安排第二连接或传播注入的异常。阶段包括 batch_normalized、before_object_install、object_installed、segment_installed、admission_prepared、before_batch_publish、metadata_after_manifest、scan_bucket、compaction_inputs_read、before_compaction_publish、compaction_metadata_after_manifest、rebucket_prepared。两个 metadata 阶段位于短写事务内，回调不得在这里等待另一个写连接；其余载荷准备、安装及读取阶段均在写事务外。segment_rows 和 index_stride 是正整数，用于控制段大小及索引密度。
 
-项目保留历史对象，不包含历史到期回收、远端对象存储或分布式协调。
+验证入口：
+
+```sh
+python3.11 -B verify.py
+```
+
+它依次运行原完整回归、reconcile_rebucket.py 的独立历史核账、REBUCKET 公开样例与两个 demo，任一失败非零退出。
+
+项目保留历史对象，不包含历史到期回收、远端对象存储或分布式协调，也不做第二次调桶、任务取消、旧对象回收或杀进程恢复。

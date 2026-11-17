@@ -46,7 +46,8 @@ def publish_batch(catalog, request_id, fingerprint, input_head,
         if head.id != input_head.id or candidate != head.commit + 1:
             raise HeadChanged()
         manifest_id = create_manifest(
-            catalog, candidate, head.segments + tuple(segments)
+            catalog, candidate, head.segments + tuple(segments),
+            head.bucket_count,
         )
         emit("metadata_after_manifest", {"manifest_id": manifest_id})
         catalog.connection.execute(

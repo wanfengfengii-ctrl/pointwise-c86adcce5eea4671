@@ -2,6 +2,7 @@ import uuid
 from dataclasses import dataclass
 
 from lake.admission.validation import validate_id
+from lake.catalog.schema import FIXED_BUCKET_COUNT
 from lake.segments.codec import encode_segment_meta, decode_segment_meta
 
 
@@ -10,6 +11,7 @@ class Manifest:
     id: int
     commit: int
     segments: tuple
+    bucket_count: int = FIXED_BUCKET_COUNT
 
 
 @dataclass(frozen=True)
@@ -21,10 +23,13 @@ class SnapshotBinding:
 
 def get_manifest(catalog, manifest_id):
     row = catalog.connection.execute(
-        "SELECT business_commit FROM manifests WHERE id=?", (manifest_id,)
+        "SELECT business_commit, bucket_count FROM manifests WHERE id=?",
+        (manifest_id,),
     ).fetchone()
     if row is None:
         raise ValueError("unknown manifest")
+    if row[1] not in (2, 3):
+        raise ValueError("unsupported manifest layout")
     segments = tuple(
         decode_segment_meta(entry[0])
         for entry in catalog.connection.execute(
@@ -32,7 +37,7 @@ def get_manifest(catalog, manifest_id):
             "WHERE manifest_id=? ORDER BY position", (manifest_id,)
         )
     )
-    return Manifest(manifest_id, row[0], segments)
+    return Manifest(manifest_id, row[0], segments, row[1])
 
 
 def get_head(catalog):
@@ -42,15 +47,18 @@ def get_head(catalog):
     return get_manifest(catalog, row[0])
 
 
-def create_manifest(catalog, commit, segments):
+def create_manifest(catalog, commit, segments, bucket_count=FIXED_BUCKET_COUNT):
     if not catalog.connection.in_transaction:
         raise RuntimeError("manifest publication needs a transaction")
     if type(commit) is not int or commit < 0:
         raise ValueError("invalid manifest commit")
+    if bucket_count not in (2, 3):
+        raise ValueError("invalid manifest bucket count")
     descriptors = [encode_segment_meta(segment).decode("utf-8")
                    for segment in segments]
     cursor = catalog.connection.execute(
-        "INSERT INTO manifests(business_commit) VALUES (?)", (commit,)
+        "INSERT INTO manifests(business_commit, bucket_count) VALUES (?, ?)",
+        (commit, bucket_count),
     )
     manifest_id = cursor.lastrowid
     catalog.connection.executemany(
